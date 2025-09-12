@@ -6,6 +6,16 @@ app = Flask(__name__)
 
 @app.route("/predict", methods=["POST"])
 def predict():
+    """
+    Handle PDF uploaded from Google Apps Script as multipart/form-data.
+    Returns JSON with:
+      - color_mode: RGB/CMYK detected
+      - fonts_enclosed: True/False
+      - layers: True/False
+      - images_embedded: int
+      - images_linked: int
+      - images_low_dpi: int
+    """
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
 
@@ -18,7 +28,8 @@ def predict():
         "fonts_enclosed": None,
         "layers": False,
         "images_embedded": 0,
-        "images_linked": 0
+        "images_linked": 0,
+        "images_low_dpi": 0
     }
 
     try:
@@ -28,6 +39,7 @@ def predict():
         has_layers = False
         embedded_count = 0
         linked_count = 0
+        low_dpi_count = 0
 
         for page in doc:
             # Fonts
@@ -43,17 +55,23 @@ def predict():
                 xref = img[0]
                 try:
                     pix = fitz.Pixmap(doc, xref)
-                    if pix.samples:  # actual image data → embedded
+                    if pix.samples:  # embedded
                         embedded_count += 1
-                    else:           # no image data → linked
+                        # DPI calculation
+                        dpi_x = pix.width / (page.rect.width / 72)
+                        dpi_y = pix.height / (page.rect.height / 72)
+                        if dpi_x < 100 or dpi_y < 100:
+                            low_dpi_count += 1
+                    else:  # linked
                         linked_count += 1
-                except Exception:
-                    linked_count += 1  # fallback
-                pix = None
 
-                # Detect image color
-                if pix and pix.n in (3, 4):
-                    colors.add("RGB" if pix.n == 3 else "CMYK")
+                    # Image color mode
+                    if pix.n in (3, 4):
+                        colors.add("RGB" if pix.n == 3 else "CMYK")
+
+                except Exception:
+                    linked_count += 1
+                pix = None
 
             # Vector colors (fill/stroke)
             for item in page.get_drawings():
@@ -65,7 +83,7 @@ def predict():
                         elif len(color) == 4:
                             colors.add("CMYK")
 
-            # Optional content groups (layers)
+            # Layers (Optional Content Groups)
             if hasattr(page, "get_ocgs") and page.get_ocgs():
                 has_layers = True
 
@@ -74,6 +92,7 @@ def predict():
         result["layers"] = has_layers
         result["images_embedded"] = embedded_count
         result["images_linked"] = linked_count
+        result["images_low_dpi"] = low_dpi_count
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
