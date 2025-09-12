@@ -15,6 +15,7 @@ def predict():
       - images_embedded: int
       - images_linked: int
       - images_low_dpi: int
+      - has_cut_contour_layer: True/False
     """
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
@@ -29,7 +30,8 @@ def predict():
         "layers": False,
         "images_embedded": 0,
         "images_linked": 0,
-        "images_low_dpi": 0
+        "images_low_dpi": 0,
+        "has_cut_contour_layer": False
     }
 
     try:
@@ -40,6 +42,7 @@ def predict():
         embedded_count = 0
         linked_count = 0
         low_dpi_count = 0
+        has_cut_contour = False
 
         for page in doc:
             # Fonts
@@ -86,6 +89,11 @@ def predict():
             # Layers (Optional Content Groups)
             if hasattr(page, "get_ocgs") and page.get_ocgs():
                 has_layers = True
+                ocgs = page.get_ocgs()
+                for ocg in ocgs:
+                    name = ocg.get("name", "")
+                    if "cut-contour" in name.lower():
+                        has_cut_contour = True
 
         result["fonts_enclosed"] = True if fonts else False
         result["color_mode"] = list(colors)
@@ -93,6 +101,7 @@ def predict():
         result["images_embedded"] = embedded_count
         result["images_linked"] = linked_count
         result["images_low_dpi"] = low_dpi_count
+        result["has_cut_contour_layer"] = has_cut_contour
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
