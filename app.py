@@ -4,23 +4,25 @@ import fitz  # PyMuPDF
 
 app = Flask(__name__)
 
-@app.route("/analyze_pdf", methods=["POST"])
-def analyze_pdf():
-    result = {"color_mode": None, "fonts_enclosed": None, "layers": None}
+@app.route("/predict", methods=["POST"])
+def predict():
+    """
+    Handle PDF uploaded from Google Apps Script as multipart/form-data.
+    Returns JSON with:
+      - color_mode: RGB/CMYK detected
+      - fonts_enclosed: True/False
+      - layers: True/False
+    """
 
-    if "file" in request.files:
-        file = request.files["file"]
-        pdf_path = f"/tmp/{file.filename}"
-        file.save(pdf_path)
-    elif request.json and "file_url" in request.json:
-        import requests
-        url = request.json["file_url"]
-        pdf_path = "/tmp/temp.pdf"
-        r = requests.get(url)
-        with open(pdf_path, "wb") as f:
-            f.write(r.content)
-    else:
-        return jsonify({"error": "No file provided"}), 400
+    # Check if file uploaded
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+
+    file = request.files["file"]
+    pdf_path = f"/tmp/{file.filename}"
+    file.save(pdf_path)
+
+    result = {"color_mode": None, "fonts_enclosed": None, "layers": None}
 
     try:
         doc = fitz.open(pdf_path)
@@ -29,12 +31,20 @@ def analyze_pdf():
         has_layers = False
 
         for page in doc:
+            # Check images for color mode
             for img in page.get_images(full=True):
                 xref = img[0]
                 pix = fitz.Pixmap(doc, xref)
                 if pix.n in (3, 4):
                     colors.add("RGB" if pix.n == 3 else "CMYK")
-            fonts.update([x[0] for x in page.get_text("dict")["blocks"] if x.get("font")])
+            # Collect fonts used
+            blocks = page.get_text("dict")["blocks"]
+            for b in blocks:
+                for line in b.get("lines", []):
+                    for span in line.get("spans", []):
+                        if span.get("font"):
+                            fonts.add(span.get("font"))
+            # Check if page has layers (optional, depends on PDF)
             if hasattr(page, 'get_layers') and len(page.get_layers()) > 0:
                 has_layers = True
 
@@ -46,6 +56,7 @@ def analyze_pdf():
         return jsonify({"error": str(e)}), 500
 
     return jsonify(result)
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
