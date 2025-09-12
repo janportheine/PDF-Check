@@ -1,7 +1,6 @@
 from flask import Flask, request, jsonify
 import os
 import fitz  # PyMuPDF
-import pikepdf
 
 app = Flask(__name__)
 
@@ -14,8 +13,6 @@ def predict():
       - fonts_enclosed: True/False
       - layers: True/False
     """
-
-    # Check if file uploaded
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
 
@@ -23,44 +20,52 @@ def predict():
     pdf_path = f"/tmp/{file.filename}"
     file.save(pdf_path)
 
-    result = {"color_mode": [], "fonts_enclosed": None, "layers": None}
+    result = {"color_mode": [], "fonts_enclosed": None, "layers": False}
 
-    # Detect fonts using PyMuPDF
     try:
         doc = fitz.open(pdf_path)
         fonts = set()
+        colors = set()
+        has_layers = False
+
         for page in doc:
+            # Fonts
             blocks = page.get_text("dict")["blocks"]
             for b in blocks:
                 for line in b.get("lines", []):
                     for span in line.get("spans", []):
                         if span.get("font"):
                             fonts.add(span.get("font"))
+
+            # Images
+            for img in page.get_images(full=True):
+                xref = img[0]
+                pix = fitz.Pixmap(doc, xref)
+                if pix.n in (3, 4):
+                    colors.add("RGB" if pix.n == 3 else "CMYK")
+                pix = None
+
+            # Vector colors (fill/stroke)
+            for item in page.get_drawings():
+                for path in item["items"]:
+                    if path[0] in ("fill", "stroke"):
+                        color = path[1]
+                        # color is a tuple of floats 0-1
+                        if len(color) == 3:
+                            colors.add("RGB")
+                        elif len(color) == 4:
+                            colors.add("CMYK")
+
+            # Optional content groups (layers)
+            if hasattr(page, "get_ocgs") and page.get_ocgs():
+                has_layers = True
+
         result["fonts_enclosed"] = True if fonts else False
-    except Exception as e:
-        result["fonts_enclosed"] = False
+        result["color_mode"] = list(colors)
+        result["layers"] = has_layers
 
-    # Detect color mode and layers using pikepdf
-    try:
-        pdf = pikepdf.Pdf.open(pdf_path)
-        color_spaces = set()
-        # Check ColorSpace in each page
-        for page in pdf.pages:
-            resources = page.get('/Resources', {})
-            color_space = resources.get('/ColorSpace', {})
-            for cs in color_space.values():
-                cs_name = str(cs)
-                if 'DeviceCMYK' in cs_name:
-                    color_spaces.add('CMYK')
-                elif 'DeviceRGB' in cs_name:
-                    color_spaces.add('RGB')
-        result['color_mode'] = list(color_spaces)
-
-        # Detect layers (OCG)
-        result['layers'] = True if '/OCProperties' in pdf.root else False
     except Exception as e:
-        result['color_mode'] = []
-        result['layers'] = False
+        return jsonify({"error": str(e)}), 500
 
     return jsonify(result)
 
