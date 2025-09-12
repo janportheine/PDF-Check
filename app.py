@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 import os
 import fitz  # PyMuPDF
+import pikepdf
 
 app = Flask(__name__)
 
@@ -22,38 +23,44 @@ def predict():
     pdf_path = f"/tmp/{file.filename}"
     file.save(pdf_path)
 
-    result = {"color_mode": None, "fonts_enclosed": None, "layers": None}
+    result = {"color_mode": [], "fonts_enclosed": None, "layers": None}
 
+    # Detect fonts using PyMuPDF
     try:
         doc = fitz.open(pdf_path)
-        colors = set()
         fonts = set()
-        has_layers = False
-
         for page in doc:
-            # Check images for color mode
-            for img in page.get_images(full=True):
-                xref = img[0]
-                pix = fitz.Pixmap(doc, xref)
-                if pix.n in (3, 4):
-                    colors.add("RGB" if pix.n == 3 else "CMYK")
-            # Collect fonts used
             blocks = page.get_text("dict")["blocks"]
             for b in blocks:
                 for line in b.get("lines", []):
                     for span in line.get("spans", []):
                         if span.get("font"):
                             fonts.add(span.get("font"))
-            # Check if page has layers (optional, depends on PDF)
-            if hasattr(page, 'get_layers') and len(page.get_layers()) > 0:
-                has_layers = True
-
-        result["color_mode"] = list(colors)
         result["fonts_enclosed"] = True if fonts else False
-        result["layers"] = has_layers
-
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        result["fonts_enclosed"] = False
+
+    # Detect color mode and layers using pikepdf
+    try:
+        pdf = pikepdf.Pdf.open(pdf_path)
+        color_spaces = set()
+        # Check ColorSpace in each page
+        for page in pdf.pages:
+            resources = page.get('/Resources', {})
+            color_space = resources.get('/ColorSpace', {})
+            for cs in color_space.values():
+                cs_name = str(cs)
+                if 'DeviceCMYK' in cs_name:
+                    color_spaces.add('CMYK')
+                elif 'DeviceRGB' in cs_name:
+                    color_spaces.add('RGB')
+        result['color_mode'] = list(color_spaces)
+
+        # Detect layers (OCG)
+        result['layers'] = True if '/OCProperties' in pdf.root else False
+    except Exception as e:
+        result['color_mode'] = []
+        result['layers'] = False
 
     return jsonify(result)
 
