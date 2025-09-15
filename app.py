@@ -4,19 +4,39 @@ import fitz  # PyMuPDF
 
 app = Flask(__name__)
 
+def get_document_color_mode(doc):
+    """
+    Tries to detect the declared document color mode
+    using OutputIntents (common in Illustrator PDFs).
+    """
+    try:
+        catalog = doc.pdf_catalog()
+        if "OutputIntents" in catalog:
+            intents = catalog["OutputIntents"]
+            if isinstance(intents, list) and intents:
+                intent = intents[0]  # usually the main one
+                output_condition = intent.get("OutputConditionIdentifier", "")
+                if output_condition:
+                    if "RGB" in output_condition.upper():
+                        return "RGB"
+                    elif "CMYK" in output_condition.upper():
+                        return "CMYK"
+
+                # Check ICC profile description if available
+                dest_profile = intent.get("DestOutputProfile")
+                if dest_profile:
+                    profile_desc = doc.xref_object(dest_profile, compressed=True)
+                    if "CMYK" in profile_desc.upper():
+                        return "CMYK"
+                    elif "RGB" in profile_desc.upper():
+                        return "RGB"
+        return "Unknown"
+    except Exception:
+        return "Unknown"
+
+
 @app.route("/predict", methods=["POST"])
 def predict():
-    """
-    Handle PDF uploaded from Google Apps Script as multipart/form-data.
-    Returns JSON with:
-      - color_mode: RGB/CMYK detected
-      - fonts_enclosed: True/False
-      - layers: True/False
-      - images_embedded: int
-      - images_linked: int
-      - images_low_dpi: int
-      - has_cut_contour_layer: True/False
-    """
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
 
@@ -25,7 +45,8 @@ def predict():
     file.save(pdf_path)
 
     result = {
-        "color_mode": [],
+        "document_color_mode": "Unknown",  # NEW
+        "content_color_modes": [],         # Renamed from color_mode
         "fonts_enclosed": None,
         "layers": False,
         "images_embedded": 0,
@@ -36,6 +57,10 @@ def predict():
 
     try:
         doc = fitz.open(pdf_path)
+
+        # Document-level mode
+        result["document_color_mode"] = get_document_color_mode(doc)
+
         fonts = set()
         colors = set()
         has_layers = False
@@ -69,8 +94,10 @@ def predict():
                         linked_count += 1
 
                     # Image color mode
-                    if pix.n in (3, 4):
-                        colors.add("RGB" if pix.n == 3 else "CMYK")
+                    if pix.n == 3:
+                        colors.add("RGB")
+                    elif pix.n == 4:
+                        colors.add("CMYK")
 
                 except Exception:
                     linked_count += 1
@@ -95,8 +122,9 @@ def predict():
                     if "cut-contour" in name.lower():
                         has_cut_contour = True
 
+        # Fill result
         result["fonts_enclosed"] = True if fonts else False
-        result["color_mode"] = list(colors)
+        result["content_color_modes"] = list(colors)
         result["layers"] = has_layers
         result["images_embedded"] = embedded_count
         result["images_linked"] = linked_count
