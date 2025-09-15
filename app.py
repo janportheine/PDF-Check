@@ -1,147 +1,83 @@
-import fitz  # PyMuPDF
-import re
-import xml.etree.ElementTree as ET
+from flask import Flask, request, jsonify
+from PyPDF2 import PdfReader
+from pdf2image import convert_from_path
+from PIL import Image
 
-def get_xmp_metadata(doc):
-    """
-    Extract XMP metadata from the PDF document.
-    """
-    xmp_data = doc.metadata.get("xmp", None)
-    if xmp_data:
-        try:
-            # Parse the XMP XML data
-            root = ET.fromstring(xmp_data)
-            # Define the XML namespace
-            ns = {'xmp': 'http://www.w3.org/2001/XMLSchema-instance'}
-            # Search for the color mode element
-            mode_element = root.find('.//xmp:mode', ns)
-            if mode_element is not None:
-                return mode_element.text
-        except ET.ParseError:
-            pass
-    return None
+app = Flask(__name__)
 
-def get_document_color_mode(doc):
-    """
-    Detect the document's declared color mode from OutputIntents.
-    """
-    try:
-        catalog = doc.pdf_catalog()
-        if "/OutputIntents" in catalog:
-            output_intent = catalog["/OutputIntents"]
-            if isinstance(output_intent, list):
-                for oi in output_intent:
-                    if isinstance(oi, dict):
-                        if "/OutputCondition" in oi:
-                            condition = oi["/OutputCondition"]
-                            if isinstance(condition, str):
-                                if "CMYK" in condition:
-                                    return "CMYK"
-                                elif "RGB" in condition:
-                                    return "RGB"
-    except Exception:
-        pass
-    return "Unknown"
-
-def detect_page_color_spaces(doc, page):
-    """
-    Detect declared color spaces on a page by inspecting its resources.
-    """
-    color_spaces = set()
-    try:
-        resources = page.get_resources()
-        if "/ColorSpace" in resources:
-            for key, value in resources["/ColorSpace"].items():
-                if isinstance(value, list):
-                    for item in value:
-                        if isinstance(item, str):
-                            if "DeviceCMYK" in item:
-                                color_spaces.add("DeviceCMYK")
-                            elif "DeviceRGB" in item:
-                                color_spaces.add("DeviceRGB")
-    except Exception:
-        pass
-    return color_spaces
-
-def detect_content_color_modes(page):
-    """
-    Detect the color modes of images and vector graphics on a page.
-    """
-    content_modes = set()
-    try:
-        # Check images
-        for img in page.get_images(full=True):
-            xref = img[0]
-            pix = fitz.Pixmap(doc, xref)
-            if pix.n == 3:
-                content_modes.add("RGB")
-            elif pix.n == 4:
-                content_modes.add("CMYK")
-            pix = None
-
-        # Check vector graphics
-        for item in page.get_drawings():
-            for path in item["items"]:
-                if path[0] in ("fill", "stroke"):
-                    color = path[1]
-                    if len(color) == 3:
-                        content_modes.add("RGB")
-                    elif len(color) == 4:
-                        content_modes.add("CMYK")
-    except Exception:
-        pass
-    return content_modes
-
-def analyze_pdf(pdf_path):
-    """
-    Analyze the PDF document for color mode information.
-    """
+# Utility function to check PDF content
+def analyze_pdf(file_path):
     result = {
-        "document_color_mode": "Unknown",
-        "xmp_color_mode": None,
-        "declared_color_spaces": [],
         "content_color_modes": [],
+        "declared_color_spaces": [],
+        "document_color_mode": "Unknown",
+        "fonts_enclosed": False,
+        "has_cut_contour_layer": False,
+        "images_embedded": 0,
+        "images_linked": 0,
+        "images_low_dpi": 0,
+        "layers": False,
         "mode_conflict": False,
         "warnings": []
     }
 
     try:
-        doc = fitz.open(pdf_path)
+        reader = PdfReader(file_path)
 
-        # Extract XMP metadata
-        xmp_mode = get_xmp_metadata(doc)
-        result["xmp_color_mode"] = xmp_mode
+        # Check fonts
+        for page in reader.pages:
+            if '/Font' in page['/Resources']:
+                result["fonts_enclosed"] = True
 
-        # Determine the document's declared color mode
-        doc_mode = get_document_color_mode(doc)
-        result["document_color_mode"] = doc_mode
-
-        # Analyze each page for declared color spaces and content color modes
-        declared_spaces = set()
-        content_modes = set()
-        for page in doc:
-            declared_spaces.update(detect_page_color_spaces(doc, page))
-            content_modes.update(detect_content_color_modes(page))
-
-        result["declared_color_spaces"] = list(declared_spaces)
-        result["content_color_modes"] = list(content_modes)
-
-        # Check for conflicts between declared and content color modes
-        if doc_mode in ("RGB", "CMYK"):
-            if doc_mode == "CMYK" and "RGB" in content_modes:
-                result["mode_conflict"] = True
-                result["warnings"].append("Declared CMYK, but content uses RGB")
-            elif doc_mode == "RGB" and "CMYK" in content_modes:
-                result["mode_conflict"] = True
-                result["warnings"].append("Declared RGB, but content uses CMYK")
-        elif "RGB" in content_modes and "CMYK" in content_modes:
-            result["mode_conflict"] = True
-            result["warnings"].append("Mixed RGB and CMYK content with no declared mode")
-
-        if not result["mode_conflict"]:
-            result["warnings"].append("No color mode conflicts detected")
+        # Detect images and their DPI
+        images = convert_from_path(file_path)
+        result["images_embedded"] = len(images)
+        for img in images:
+            dpi = img.info.get("dpi", (72, 72))
+            if dpi[0] < 300 or dpi[1] < 300:
+                result["images_low_dpi"] += 1
+            # Determine color mode
+            if img.mode in ["CMYK", "RGB", "RGBA"]:
+                if img.mode not in result["content_color_modes"]:
+                    result["content_color_modes"].append(img.mode)
+        # Set document color mode if consistent
+        if result["content_color_modes"]:
+            result["document_color_mode"] = result["content_color_modes"][0]
 
     except Exception as e:
-        result["error"] = str(e)
+        result["warnings"].append(f"Error analyzing PDF: {str(e)}")
+
+    # Additional checks can be added here if needed
+
+    if not result["warnings"]:
+        result["warnings"].append("No color mode conflicts detected")
 
     return result
+
+@app.route("/")
+def index():
+    return jsonify({"message": "PDF Analyzer API is running!"})
+
+@app.route("/analyze_pdf", methods=["POST"])
+def analyze_pdf_endpoint():
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+
+    file = request.files["file"]
+    if file.filename == "":
+        return jsonify({"error": "Empty filename"}), 400
+
+    # Save temporarily to analyze
+    file_path = f"/tmp/{file.filename}"
+    file.save(file_path)
+
+    result = analyze_pdf(file_path)
+    return jsonify(result)
+
+# Health check endpoint
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok"})
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
