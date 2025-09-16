@@ -1,9 +1,7 @@
 from flask import Flask, request, jsonify
 from PyPDF2 import PdfReader
-from PIL import Image
 import fitz  # PyMuPDF
 import os
-import io
 
 app = Flask(__name__)
 
@@ -17,6 +15,7 @@ def analyze_pdf(file_path):
         "images_embedded": 0,
         "images_linked": 0,
         "images_low_dpi": 0,
+        "image_list": [],  # New list to store image details
         "layers": False,
         "mode_conflict": False,
         "warnings": []
@@ -46,34 +45,53 @@ def analyze_pdf(file_path):
     # PyMuPDF analysis for images and color modes
     try:
         doc = fitz.open(file_path)
+        
+        found_color_modes = set()
+        image_details = []
+
         for page in doc:
             for img in page.get_images(full=True):
                 xref = img[0]
                 try:
                     pix = fitz.Pixmap(doc, xref)
                     
-                    # Check color space using PyMuPDF's constants
-                    if pix.colorspace.n == 1:
-                        result["content_color_modes"].append("Grayscale")
-                    elif pix.colorspace.n == 3:
-                        result["content_color_modes"].append("RGB")
-                    elif pix.colorspace.n == 4:
-                        result["content_color_modes"].append("CMYK")
+                    color_mode = "Unknown"
+                    # Use the color space name for a more explicit check
+                    if pix.colorspace.name in ("DeviceCMYK", "CMYK"):
+                        color_mode = "CMYK"
+                    elif pix.colorspace.name in ("DeviceRGB", "RGB"):
+                        color_mode = "RGB"
+                    elif pix.colorspace.name in ("DeviceGray", "Gray"):
+                        color_mode = "Grayscale"
                     else:
-                        result["content_color_modes"].append("Other")
+                        color_mode = "Other"
+                    
+                    found_color_modes.add(color_mode)
                     
                     result["images_embedded"] += 1
                     
                     # DPI check (approximated)
                     dpi = pix.xres
+                    
+                    # Add image details to the new list
+                    image_details.append({
+                        "color_mode": color_mode,
+                        "dpi": dpi,
+                        "is_low_dpi": dpi < 150
+                    })
+                    
                     if dpi < 150:
                         result["images_low_dpi"] += 1
                     
-                    pix = None  # Release the pixmap to free memory
+                    pix = None
                 except Exception as img_e:
                     result["warnings"].append(f"Failed to analyze image with xref {xref}: {str(img_e)}")
         
         doc.close()
+        
+        result["image_list"] = image_details
+        result["content_color_modes"] = list(found_color_modes)
+        
     except Exception as e:
         result["warnings"].append(f"PyMuPDF analysis failed: {str(e)}")
 
@@ -102,14 +120,12 @@ def analyze():
     if file.filename == "":
         return jsonify({"error": "No selected file"}), 400
 
-    # Save the file temporarily to a secure location
     temp_path = os.path.join("/tmp", file.filename)
     file.save(temp_path)
 
     try:
         analysis_result = analyze_pdf(temp_path)
     finally:
-        # Ensure the temporary file is deleted
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
