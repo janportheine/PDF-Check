@@ -42,6 +42,7 @@ def analyze_pdf(file_path):
         "declared_color_spaces": [],
         "document_color_mode": "Unknown",
         "fonts_enclosed": False,
+        "fonts_list": [],  # List of fonts
         "has_cut_contour_layer": False,
         "images_embedded": 0,
         "images_linked": 0,
@@ -65,11 +66,14 @@ def analyze_pdf(file_path):
         reader = PdfReader(file_path)
 
         is_all_fonts_embedded = True
+        fonts_found = set()
+
         for page in reader.pages:
             resources = page.get("/Resources", {})
             fonts = resources.get("/Font", {})
             if fonts:
-                for _, font_ref in fonts.items():
+                for font_name, font_ref in fonts.items():
+                    fonts_found.add(str(font_name))
                     try:
                         font_obj = font_ref.get_object()
                         font_desc = font_obj.get("/FontDescriptor", {})
@@ -78,12 +82,11 @@ def analyze_pdf(file_path):
                         )
                         if not embedded:
                             is_all_fonts_embedded = False
-                            break
-                    except:
-                        pass
-            if not is_all_fonts_embedded:
-                break
+                    except Exception as fe:
+                        result["warnings"].append(f"Font check failed: {fe}")
+
         result["fonts_enclosed"] = is_all_fonts_embedded
+        result["fonts_list"] = list(fonts_found)
 
         catalog = reader.trailer["/Root"]
         result["layers"] = "/OCProperties" in catalog
@@ -91,7 +94,7 @@ def analyze_pdf(file_path):
     except Exception as e:
         result["warnings"].append(f"PyPDF2 analysis failed: {str(e)}")
 
-    # --- PyMuPDF fallback for content details ---
+    # --- PyMuPDF fallback for images, vectors, text colors ---
     try:
         doc = fitz.open(file_path)
 
