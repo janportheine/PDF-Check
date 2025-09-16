@@ -15,9 +15,10 @@ def analyze_pdf(file_path):
         "images_embedded": 0,
         "images_linked": 0,
         "images_low_dpi": 0,
-        "image_list": [],  # New list to store image details
+        "image_list": [],
         "layers": False,
         "mode_conflict": False,
+        "vector_list": [],  # New list to store vector details
         "warnings": []
     }
 
@@ -25,7 +26,6 @@ def analyze_pdf(file_path):
     try:
         reader = PdfReader(file_path)
         
-        # Check for embedded fonts
         is_all_fonts_embedded = True
         if reader.pages:
             for page in reader.pages:
@@ -37,26 +37,26 @@ def analyze_pdf(file_path):
                     break
         result["fonts_enclosed"] = is_all_fonts_embedded
         
-        # Check for layers (Optional Content Properties)
         result["layers"] = any(page.get("/OCProperties") for page in reader.pages) if reader.pages else False
     except Exception as e:
         result["warnings"].append(f"PyPDF2 analysis failed: {str(e)}")
 
-    # PyMuPDF analysis for images and color modes
+    # PyMuPDF analysis for all content types
     try:
         doc = fitz.open(file_path)
         
         found_color_modes = set()
         image_details = []
+        vector_details = []
 
-        for page in doc:
+        for page_index, page in enumerate(doc):
+            # Check for colors in images
             for img in page.get_images(full=True):
                 xref = img[0]
                 try:
                     pix = fitz.Pixmap(doc, xref)
                     
                     color_mode = "Unknown"
-                    # Use the color space name for a more explicit check
                     if pix.colorspace.name in ("DeviceCMYK", "CMYK"):
                         color_mode = "CMYK"
                     elif pix.colorspace.name in ("DeviceRGB", "RGB"):
@@ -67,29 +67,63 @@ def analyze_pdf(file_path):
                         color_mode = "Other"
                     
                     found_color_modes.add(color_mode)
-                    
                     result["images_embedded"] += 1
                     
-                    # DPI check (approximated)
                     dpi = pix.xres
+                    if dpi < 150:
+                        result["images_low_dpi"] += 1
                     
-                    # Add image details to the new list
                     image_details.append({
+                        "page": page_index + 1,
                         "color_mode": color_mode,
                         "dpi": dpi,
                         "is_low_dpi": dpi < 150
                     })
                     
-                    if dpi < 150:
-                        result["images_low_dpi"] += 1
-                    
                     pix = None
                 except Exception as img_e:
                     result["warnings"].append(f"Failed to analyze image with xref {xref}: {str(img_e)}")
-        
+
+            # Check for colors in vector graphics and text
+            for drawing in page.get_drawings():
+                line_color_mode = "Unknown"
+                fill_color_mode = "Unknown"
+
+                # Check line color
+                if 'line_info' in drawing and 'cs_name' in drawing['line_info']:
+                    cs_name = drawing['line_info']['cs_name']
+                    if cs_name in ("DeviceCMYK", "CMYK"):
+                        line_color_mode = "CMYK"
+                    elif cs_name in ("DeviceRGB", "RGB"):
+                        line_color_mode = "RGB"
+                    elif cs_name in ("DeviceGray", "Gray"):
+                        line_color_mode = "Grayscale"
+                
+                # Check fill color
+                if 'fill_info' in drawing and 'cs_name' in drawing['fill_info']:
+                    cs_name = drawing['fill_info']['cs_name']
+                    if cs_name in ("DeviceCMYK", "CMYK"):
+                        fill_color_mode = "CMYK"
+                    elif cs_name in ("DeviceRGB", "RGB"):
+                        fill_color_mode = "RGB"
+                    elif cs_name in ("DeviceGray", "Gray"):
+                        fill_color_mode = "Grayscale"
+                
+                # Add unique modes to the main set
+                if line_color_mode != "Unknown": found_color_modes.add(line_color_mode)
+                if fill_color_mode != "Unknown": found_color_modes.add(fill_color_mode)
+                
+                vector_details.append({
+                    "page": page_index + 1,
+                    "type": drawing['type'],
+                    "line_color_mode": line_color_mode,
+                    "fill_color_mode": fill_color_mode
+                })
+
         doc.close()
         
         result["image_list"] = image_details
+        result["vector_list"] = vector_details
         result["content_color_modes"] = list(found_color_modes)
         
     except Exception as e:
