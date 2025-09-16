@@ -3,3 +3,4 @@ PyMuPDF==1.22.0
 Pillow==9.4.0
 PyPDF2==3.0.1
 gunicorn==21.2.0
+Werkzeug==2.2.3
