@@ -1,10 +1,41 @@
 from flask import Flask, request, jsonify
 from PyPDF2 import PdfReader
 import fitz  # PyMuPDF
+import xml.etree.ElementTree as ET
 import os
 
 app = Flask(__name__)
 
+# ---- Helper for color detection ----
+def detect_color_mode(color_tuple):
+    """Detects color mode (RGB/CMYK/Grayscale) from a PyMuPDF tuple or None."""
+    if color_tuple is None:
+        return "Unknown"
+    if isinstance(color_tuple, tuple):
+        if len(color_tuple) == 4:
+            return "CMYK"
+        elif len(color_tuple) == 3:
+            return "RGB"
+        elif len(color_tuple) == 1:
+            return "Grayscale"
+    return "Unknown"
+
+# ---- Extract XMP color mode ----
+def extract_xmp_color_mode(file_path):
+    try:
+        reader = PdfReader(file_path)
+        if "/Metadata" in reader.trailer["/Root"]:
+            metadata_obj = reader.trailer["/Root"]["/Metadata"].get_object()
+            xmp_xml = metadata_obj.get_data()
+            root = ET.fromstring(xmp_xml)
+            for elem in root.iter():
+                if elem.tag.lower().endswith("mode") and elem.text:
+                    return elem.text.strip()
+    except Exception as e:
+        print("XMP parsing error:", e)
+    return None
+
+# ---- PDF Analyzer Function ----
 def analyze_pdf(file_path):
     result = {
         "content_color_modes": [],
@@ -19,12 +50,17 @@ def analyze_pdf(file_path):
         "layers": False,
         "mode_conflict": False,
         "vector_list": [],
+        "text_colors": [],
         "warnings": []
     }
 
-    # -----------------------------
-    # PyPDF2 analysis (fonts, layers)
-    # -----------------------------
+    # --- XMP metadata first ---
+    xmp_mode = extract_xmp_color_mode(file_path)
+    if xmp_mode:
+        result["document_color_mode"] = xmp_mode.upper()
+        result["content_color_modes"].append(xmp_mode.upper())
+
+    # --- PyPDF2 fonts/layers ---
     try:
         reader = PdfReader(file_path)
 
@@ -36,7 +72,6 @@ def analyze_pdf(file_path):
                 for _, font_ref in fonts.items():
                     try:
                         font_obj = font_ref.get_object()
-                        # Check for embedded font file streams
                         font_desc = font_obj.get("/FontDescriptor", {})
                         embedded = any(
                             k in font_desc for k in ("/FontFile", "/FontFile2", "/FontFile3")
@@ -44,52 +79,45 @@ def analyze_pdf(file_path):
                         if not embedded:
                             is_all_fonts_embedded = False
                             break
-                    except Exception as fe:
-                        result["warnings"].append(f"Font check failed: {fe}")
+                    except:
+                        pass
             if not is_all_fonts_embedded:
                 break
         result["fonts_enclosed"] = is_all_fonts_embedded
 
-        # Layers (Optional Content groups)
         catalog = reader.trailer["/Root"]
         result["layers"] = "/OCProperties" in catalog
 
     except Exception as e:
         result["warnings"].append(f"PyPDF2 analysis failed: {str(e)}")
 
-    # -----------------------------
-    # PyMuPDF analysis (images, vectors, colors)
-    # -----------------------------
+    # --- PyMuPDF fallback for content details ---
     try:
         doc = fitz.open(file_path)
 
-        found_color_modes = set()
+        found_color_modes = set(result["content_color_modes"])
         image_details = []
         vector_details = []
+        text_color_details = []
 
         for page_index, page in enumerate(doc):
-            # --- Images ---
+            # Images
             for img in page.get_images(full=True):
-                xref = img[0]
                 try:
-                    pix = fitz.Pixmap(doc, xref)
-                    if pix.colorspace is not None:
-                        cs_channels = pix.colorspace.n
-                        if cs_channels == 4:   # CMYK
-                            color_mode = "CMYK"
-                        elif cs_channels == 3: # RGB
-                            color_mode = "RGB"
-                        elif cs_channels == 1: # Grayscale
-                            color_mode = "Grayscale"
-                        else:
-                            color_mode = "Other"
+                    colorspace = img[5]
+                    if colorspace == "/DeviceCMYK":
+                        color_mode = "CMYK"
+                    elif colorspace == "/DeviceRGB":
+                        color_mode = "RGB"
+                    elif colorspace == "/DeviceGray":
+                        color_mode = "Grayscale"
                     else:
                         color_mode = "Unknown"
 
                     found_color_modes.add(color_mode)
                     result["images_embedded"] += 1
 
-                    dpi_x, dpi_y = pix.xres, pix.yres
+                    dpi_x, dpi_y = img[8], img[9]
                     dpi = min(dpi_x, dpi_y)
                     if dpi < 150:
                         result["images_low_dpi"] += 1
@@ -100,32 +128,14 @@ def analyze_pdf(file_path):
                         "dpi": dpi,
                         "is_low_dpi": dpi < 150
                     })
-
-                    pix = None
                 except Exception as img_e:
-                    result["warnings"].append(f"Failed to analyze image (xref {xref}): {str(img_e)}")
+                    result["warnings"].append(f"Failed to analyze image: {str(img_e)}")
 
-            # --- Vectors (drawings) ---
+            # Vectors
             try:
-                for drawing in page.get_cdrawings():  # new API
-                    line_color_mode = "Unknown"
-                    fill_color_mode = "Unknown"
-
-                    if "color" in drawing:
-                        if drawing["color"].is_cmyk:
-                            line_color_mode = "CMYK"
-                        elif drawing["color"].is_rgb:
-                            line_color_mode = "RGB"
-                        elif drawing["color"].is_gray:
-                            line_color_mode = "Grayscale"
-
-                    if "fill" in drawing:
-                        if drawing["fill"].is_cmyk:
-                            fill_color_mode = "CMYK"
-                        elif drawing["fill"].is_rgb:
-                            fill_color_mode = "RGB"
-                        elif drawing["fill"].is_gray:
-                            fill_color_mode = "Grayscale"
+                for drawing in page.get_cdrawings():
+                    line_color_mode = detect_color_mode(drawing.get("color"))
+                    fill_color_mode = detect_color_mode(drawing.get("fill"))
 
                     if line_color_mode != "Unknown":
                         found_color_modes.add(line_color_mode)
@@ -141,45 +151,46 @@ def analyze_pdf(file_path):
             except Exception as ve:
                 result["warnings"].append(f"Vector analysis failed on page {page_index+1}: {str(ve)}")
 
+            # Text colors
+            try:
+                rawdict = page.get_text("rawdict")
+                for block in rawdict["blocks"]:
+                    for line in block.get("lines", []):
+                        for span in line.get("spans", []):
+                            col = span.get("color")
+                            color_mode = detect_color_mode(col)
+                            if color_mode != "Unknown":
+                                found_color_modes.add(color_mode)
+                                text_color_details.append({
+                                    "page": page_index + 1,
+                                    "text": span.get("text", "")[:30],
+                                    "color_mode": color_mode
+                                })
+            except Exception as te:
+                result["warnings"].append(f"Text analysis failed on page {page_index+1}: {str(te)}")
+
         doc.close()
 
         result["image_list"] = image_details
         result["vector_list"] = vector_details
+        result["text_colors"] = text_color_details
         result["content_color_modes"] = list(found_color_modes)
 
     except Exception as e:
         result["warnings"].append(f"PyMuPDF analysis failed: {str(e)}")
 
-    # -----------------------------
-    # Final: determine document color mode
-    # -----------------------------
-    unique_modes = list(set(result["content_color_modes"]))
-    if "CMYK" in unique_modes and "RGB" in unique_modes:
-        result["mode_conflict"] = True
-        result["document_color_mode"] = "Mixed"
-    elif "CMYK" in unique_modes:
-        result["document_color_mode"] = "CMYK"
-    elif "RGB" in unique_modes:
-        result["document_color_mode"] = "RGB"
-    elif "Grayscale" in unique_modes:
-        result["document_color_mode"] = "Grayscale"
-    else:
-        result["document_color_mode"] = "Unknown"
-
     return result
 
 
-# -----------------------------
-# Flask endpoint
-# -----------------------------
+# ---- Flask Routes ----
 @app.route("/analyze", methods=["POST"])
 def analyze():
     if "file" not in request.files:
-        return jsonify({"error": "No file part"}), 400
+        return jsonify({"error": "No file uploaded"}), 400
 
     file = request.files["file"]
     if file.filename == "":
-        return jsonify({"error": "No selected file"}), 400
+        return jsonify({"error": "Empty filename"}), 400
 
     temp_path = os.path.join("/tmp", file.filename)
     file.save(temp_path)
@@ -194,4 +205,5 @@ def analyze():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    # Render requires host 0.0.0.0
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
