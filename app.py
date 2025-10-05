@@ -98,7 +98,7 @@ def analyze_pdf(file_path):
         "content_color_modes": [],
         "declared_color_spaces": [],
         "document_color_mode": "Unknown",
-        "fonts_enclosed": False,
+        "fonts": False,
         "fonts_list": [],
         "has_cut_contour_layer": False,
         "images_embedded": 0,
@@ -196,7 +196,7 @@ def analyze_pdf(file_path):
                     except Exception as xe:
                         pass  # Silent fail for XObject inspection
 
-        result["fonts_enclosed"] = is_all_fonts_embedded
+        result["fonts"] = len(fonts_found) > 0
         result["fonts_list"] = list(fonts_found)
         result["linked_images_list"] = linked_images
         
