@@ -68,6 +68,7 @@ def analyze_pdf(file_path):
         "images_linked": 0,
         "images_low_dpi": 0,
         "image_list": [],
+        "linked_images_list": [],
         "layers": False,
         "mode_conflict": False,
         "vector_list": [],
