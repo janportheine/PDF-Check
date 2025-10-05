@@ -119,33 +119,58 @@ def check_cut_layers_in_xmp(file_path):
 def download_from_google_drive(file_id):
     """Download a file from Google Drive using the file ID."""
     try:
-        # Google Drive direct download URL for shared files
+        # Try direct download first
         download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+        
+        session = requests.Session()
+        response = session.get(download_url, stream=True)
+        
+        # Check for virus scan warning (large files)
+        token = None
+        for key, value in response.cookies.items():
+            if key.startswith('download_warning'):
+                token = value
+                break
+        
+        if token:
+            # Retry with confirmation token for large files
+            params = {'id': file_id, 'confirm': token}
+            response = session.get(download_url, params=params, stream=True)
+        
+        # Alternative: Check if response is HTML (error page)
+        content_type = response.headers.get('Content-Type', '')
+        if 'text/html' in content_type:
+            # Try alternative download URL
+            download_url = f"https://drive.google.com/u/0/uc?id={file_id}&export=download&confirm=t"
+            response = session.get(download_url, stream=True)
+        
+        if response.status_code != 200:
+            return None, f"Failed to download file: HTTP {response.status_code}"
         
         # Create a temporary file
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
         temp_path = temp_file.name
         
-        # Download the file
-        response = requests.get(download_url, stream=True)
+        # Write the content
+        with open(temp_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=32768):
+                if chunk:
+                    f.write(chunk)
         
-        # Check if we need to handle the virus scan warning page
-        if 'text/html' in response.headers.get('Content-Type', ''):
-            # Try to get the confirmation token for large files
-            for key, value in response.cookies.items():
-                if key.startswith('download_warning'):
-                    download_url = f"https://drive.google.com/uc?export=download&id={file_id}&confirm={value}"
-                    response = requests.get(download_url, stream=True)
-                    break
+        # Verify it's a valid PDF
+        file_size = os.path.getsize(temp_path)
+        if file_size == 0:
+            os.remove(temp_path)
+            return None, "Downloaded file is empty"
         
-        if response.status_code == 200:
-            with open(temp_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-            return temp_path, None
-        else:
-            return None, f"Failed to download file: HTTP {response.status_code}"
+        # Check PDF header
+        with open(temp_path, 'rb') as f:
+            header = f.read(5)
+            if header != b'%PDF-':
+                os.remove(temp_path)
+                return None, "Downloaded file is not a valid PDF. Make sure the file is shared with 'Anyone with the link can view'"
+        
+        return temp_path, None
             
     except Exception as e:
         return None, f"Download error: {str(e)}"
