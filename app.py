@@ -123,39 +123,51 @@ def download_from_google_drive(file_id):
         download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
         
         session = requests.Session()
-        response = session.get(download_url, stream=True)
+        response = session.get(download_url, stream=True, allow_redirects=True)
+        
+        print(f"Initial response status: {response.status_code}")
+        print(f"Content-Type: {response.headers.get('Content-Type')}")
         
         # Check for virus scan warning (large files)
         token = None
         for key, value in response.cookies.items():
             if key.startswith('download_warning'):
                 token = value
+                print(f"Found download warning token: {token}")
                 break
         
         if token:
             # Retry with confirmation token for large files
             params = {'id': file_id, 'confirm': token}
-            response = session.get(download_url, params=params, stream=True)
+            response = session.get(download_url, params=params, stream=True, allow_redirects=True)
+            print(f"Retry response status: {response.status_code}")
         
         # Alternative: Check if response is HTML (error page)
         content_type = response.headers.get('Content-Type', '')
-        if 'text/html' in content_type:
-            # Try alternative download URL
-            download_url = f"https://drive.google.com/u/0/uc?id={file_id}&export=download&confirm=t"
-            response = session.get(download_url, stream=True)
+        if 'text/html' in content_type and not token:
+            # For large files, Google uses a different pattern
+            # Try to extract the confirm code from the HTML
+            print("Received HTML, trying alternative method")
+            download_url = f"https://drive.google.com/u/0/uc?id={file_id}&export=download&confirm=t&uuid={file_id[:8]}"
+            response = session.get(download_url, stream=True, allow_redirects=True)
+            print(f"Alternative response status: {response.status_code}")
         
         if response.status_code != 200:
-            return None, f"Failed to download file: HTTP {response.status_code}"
+            return None, f"Failed to download file: HTTP {response.status_code}. Make sure the file is shared publicly."
         
         # Create a temporary file
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
         temp_path = temp_file.name
         
         # Write the content
+        bytes_written = 0
         with open(temp_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=32768):
                 if chunk:
                     f.write(chunk)
+                    bytes_written += len(chunk)
+        
+        print(f"Downloaded {bytes_written} bytes to {temp_path}")
         
         # Verify it's a valid PDF
         file_size = os.path.getsize(temp_path)
@@ -166,13 +178,21 @@ def download_from_google_drive(file_id):
         # Check PDF header
         with open(temp_path, 'rb') as f:
             header = f.read(5)
+            print(f"File header: {header}")
             if header != b'%PDF-':
+                # Try to read first 200 bytes to see what we got
+                f.seek(0)
+                preview = f.read(200)
+                print(f"File preview: {preview[:100]}")
                 os.remove(temp_path)
                 return None, "Downloaded file is not a valid PDF. Make sure the file is shared with 'Anyone with the link can view'"
         
         return temp_path, None
             
     except Exception as e:
+        print(f"Exception during download: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return None, f"Download error: {str(e)}"
 
 # ---- PDF Analyzer Function ----
