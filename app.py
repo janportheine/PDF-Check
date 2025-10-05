@@ -221,12 +221,18 @@ def analyze_pdf(file_path):
         vector_details = []
         text_color_details = []
         linked_img_index = 0
+        processed_xrefs = set()  # Track processed images to avoid duplicates
 
         for page_index, page in enumerate(doc):
             # Image analysis
             for img in page.get_images(full=True):
                 try:
                     xref = img[0]  # Image xref number
+                    
+                    # Skip if already processed (avoid duplicates)
+                    if xref in processed_xrefs:
+                        continue
+                    processed_xrefs.add(xref)
                     
                     # Try to extract the image to check if it's truly embedded
                     is_embedded = True
@@ -289,20 +295,14 @@ def analyze_pdf(file_path):
                         "is_embedded": is_embedded
                     }
                     
-                    if actual_path:
-                        image_info["path"] = actual_path
-                    
                     if is_embedded:
                         result["images_embedded"] += 1
                     else:
                         result["images_linked"] += 1
                         linked_info = {
                             "page": page_index + 1,
-                            "name": image_name,
-                            "xref": xref
+                            "name": image_name
                         }
-                        if actual_path:
-                            linked_info["path"] = actual_path
                         result["linked_images_list"].append(linked_info)
                         result["warnings"].append(f"Linked image '{image_name}' found on page {page_index + 1}")
                     
