@@ -153,6 +153,33 @@ def analyze_pdf(file_path):
             # Image analysis
             for img in page.get_images(full=True):
                 try:
+                    xref = img[0]  # Image xref number
+                    
+                    # Try to extract the image to check if it's truly embedded
+                    is_embedded = True
+                    image_name = img[7] if len(img) > 7 else f"img_{xref}"
+                    
+                    try:
+                        # Attempt to extract image bytes
+                        pix = fitz.Pixmap(doc, xref)
+                        # If we can create a pixmap and it has valid data, it's embedded
+                        if pix.size == 0:
+                            is_embedded = False
+                        pix = None  # Clean up
+                    except:
+                        # If extraction fails, it might be linked
+                        is_embedded = False
+                    
+                    # Also check the image object for external file references
+                    try:
+                        img_obj = doc.xref_object(xref)
+                        if "/F" in img_obj or "FFilter" in img_obj or "/Type/XObject" in img_obj:
+                            # Check if it references an external file
+                            if "/F" in img_obj:
+                                is_embedded = False
+                    except:
+                        pass
+                    
                     colorspace = img[5]
                     if colorspace == "/DeviceCMYK":
                         color_mode = "CMYK"
@@ -164,7 +191,6 @@ def analyze_pdf(file_path):
                         color_mode = "Unknown"
 
                     found_color_modes.add(color_mode)
-                    result["images_embedded"] += 1
 
                     # DPI check
                     dpi_x, dpi_y = img[8] if img[8] else 0, img[9] if img[9] else 0
@@ -173,12 +199,28 @@ def analyze_pdf(file_path):
                     if 0 < dpi < 150:
                         result["images_low_dpi"] += 1
 
-                    image_details.append({
+                    image_info = {
                         "page": page_index + 1,
+                        "name": image_name,
                         "color_mode": color_mode,
                         "dpi": dpi,
-                        "is_low_dpi": 0 < dpi < 150
-                    })
+                        "is_low_dpi": 0 < dpi < 150,
+                        "is_embedded": is_embedded
+                    }
+                    
+                    if is_embedded:
+                        result["images_embedded"] += 1
+                    else:
+                        result["images_linked"] += 1
+                        result["linked_images_list"].append({
+                            "page": page_index + 1,
+                            "name": image_name,
+                            "xref": xref
+                        })
+                        result["warnings"].append(f"Linked image '{image_name}' found on page {page_index + 1}")
+                    
+                    image_details.append(image_info)
+                    
                 except Exception as img_e:
                     result["warnings"].append(f"Failed to analyze image on page {page_index + 1}: {str(img_e)}")
 
@@ -227,6 +269,12 @@ def analyze_pdf(file_path):
         result["vector_list"] = vector_details
         result["text_colors"] = text_color_details
         result["content_color_modes"] = list(found_color_modes)
+
+        # Add final warning if linked images found
+        if result["images_linked"] > 0:
+            result["warnings"].append(
+                f"Found {result['images_linked']} linked (external) images. PDF may not be portable and images may be missing."
+            )
 
         # Check for mode conflicts
         if len(found_color_modes) > 1:
