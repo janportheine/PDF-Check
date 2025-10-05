@@ -5,6 +5,8 @@ import fitz  # PyMuPDF
 import xml.etree.ElementTree as ET
 import re
 import os
+import requests
+import tempfile
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for frontend integration
@@ -112,6 +114,41 @@ def check_cut_layers_in_xmp(file_path):
         print(f"XMP cut layer check error: {e}")
     
     return False, None
+
+# ---- Download file from Google Drive ----
+def download_from_google_drive(file_id):
+    """Download a file from Google Drive using the file ID."""
+    try:
+        # Google Drive direct download URL for shared files
+        download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+        
+        # Create a temporary file
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
+        temp_path = temp_file.name
+        
+        # Download the file
+        response = requests.get(download_url, stream=True)
+        
+        # Check if we need to handle the virus scan warning page
+        if 'text/html' in response.headers.get('Content-Type', ''):
+            # Try to get the confirmation token for large files
+            for key, value in response.cookies.items():
+                if key.startswith('download_warning'):
+                    download_url = f"https://drive.google.com/uc?export=download&id={file_id}&confirm={value}"
+                    response = requests.get(download_url, stream=True)
+                    break
+        
+        if response.status_code == 200:
+            with open(temp_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            return temp_path, None
+        else:
+            return None, f"Failed to download file: HTTP {response.status_code}"
+            
+    except Exception as e:
+        return None, f"Download error: {str(e)}"
 
 # ---- PDF Analyzer Function ----
 def analyze_pdf(file_path):
@@ -456,9 +493,10 @@ def index():
     """API information endpoint."""
     return jsonify({
         "name": "PDF Analyzer API",
-        "version": "1.0",
+        "version": "2.0",
         "endpoints": {
             "/analyze": "POST - Upload PDF for analysis",
+            "/analyze-drive": "POST - Analyze PDF from Google Drive file ID",
             "/health": "GET - Health check"
         }
     })
@@ -470,7 +508,7 @@ def health():
 
 @app.route("/analyze", methods=["POST"])
 def analyze():
-    """Main PDF analysis endpoint."""
+    """Main PDF analysis endpoint - file upload."""
     # Check if file is in request
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
@@ -510,6 +548,45 @@ def analyze():
     finally:
         # Clean up temporary file
         if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception as cleanup_error:
+                print(f"Failed to remove temp file: {cleanup_error}")
+
+@app.route("/analyze-drive", methods=["POST"])
+def analyze_drive():
+    """Analyze PDF from Google Drive using file ID."""
+    data = request.get_json()
+    
+    if not data or "fileId" not in data:
+        return jsonify({"error": "No fileId provided"}), 400
+    
+    file_id = data["fileId"]
+    file_name = data.get("fileName", "unknown.pdf")
+    
+    # Download file from Google Drive
+    temp_path, error = download_from_google_drive(file_id)
+    
+    if error:
+        return jsonify({"error": error}), 400
+    
+    try:
+        # Get file size
+        file_size = os.path.getsize(temp_path)
+        
+        # Analyze the PDF
+        analysis_result = analyze_pdf(temp_path)
+        analysis_result["file_name"] = file_name
+        analysis_result["file_size_kb"] = round(file_size / 1024, 2)
+        
+        return jsonify(analysis_result), 200
+        
+    except Exception as e:
+        return jsonify({"error": f"Analysis failed: {str(e)}"}), 500
+        
+    finally:
+        # Clean up temporary file
+        if temp_path and os.path.exists(temp_path):
             try:
                 os.remove(temp_path)
             except Exception as cleanup_error:
