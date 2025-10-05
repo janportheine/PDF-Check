@@ -91,6 +91,28 @@ def extract_linked_image_paths(file_path):
     
     return list(set(linked_paths))  # Remove duplicates
 
+# ---- Check for CutContour/Thru-cut in XMP ----
+def check_cut_layers_in_xmp(file_path):
+    """Check for CutContour or Thru-cut in XMP metadata swatches."""
+    try:
+        reader = PdfReader(file_path)
+        if "/Metadata" in reader.trailer["/Root"]:
+            metadata_obj = reader.trailer["/Root"]["/Metadata"].get_object()
+            xmp_xml = metadata_obj.get_data()
+            xmp_str = xmp_xml.decode('utf-8', errors='ignore')
+            
+            # Look for swatchName tags with CutContour or Thru-cut
+            swatch_pattern = r'<xmpG:swatchName>(CutContour|Thru-cut)</xmpG:swatchName>'
+            matches = re.findall(swatch_pattern, xmp_str)
+            
+            if matches:
+                return True, matches[0]
+                
+    except Exception as e:
+        print(f"XMP cut layer check error: {e}")
+    
+    return False, None
+
 # ---- PDF Analyzer Function ----
 def analyze_pdf(file_path):
     """Comprehensive PDF analysis for print readiness."""
@@ -121,6 +143,12 @@ def analyze_pdf(file_path):
 
     # --- Extract linked image paths from XMP ---
     linked_image_paths = extract_linked_image_paths(file_path)
+    
+    # --- Check for cut layers in XMP ---
+    has_cut_in_xmp, cut_name = check_cut_layers_in_xmp(file_path)
+    if has_cut_in_xmp:
+        result["has_cut_contour_layer"] = True
+        result["warnings"].append(f"Cut layer detected in XMP metadata: {cut_name}")
 
     # --- PyPDF2 fonts/layers analysis ---
     try:
