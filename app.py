@@ -159,13 +159,17 @@ def download_from_google_drive(file_id):
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
         temp_path = temp_file.name
         
-        # Write the content
+        # Write the content with explicit flushing to disk
         bytes_written = 0
         with open(temp_path, 'wb') as f:
             for chunk in response.iter_content(chunk_size=32768):
                 if chunk:
                     f.write(chunk)
                     bytes_written += len(chunk)
+                    # Flush to disk periodically to avoid memory buildup
+                    if bytes_written % (1024 * 1024) == 0:  # Every 1MB
+                        f.flush()
+                        os.fsync(f.fileno())
         
         print(f"Downloaded {bytes_written} bytes to {temp_path}")
         
@@ -353,6 +357,10 @@ def analyze_pdf(file_path):
         text_color_details = []
         linked_img_index = 0
         processed_xrefs = set()  # Track processed images to avoid duplicates
+        
+        # Limit data collection to avoid memory issues
+        MAX_VECTORS = 100  # Limit vector details
+        MAX_TEXT_COLORS = 50  # Limit text color samples
 
         for page_index, page in enumerate(doc):
             # Image analysis
@@ -370,25 +378,15 @@ def analyze_pdf(file_path):
                     image_name = img[7] if len(img) > 7 else f"img_{xref}"
                     
                     try:
-                        # Attempt to extract image bytes
-                        pix = fitz.Pixmap(doc, xref)
-                        # If we can create a pixmap and it has valid data, it's embedded
-                        if pix.size == 0:
+                        # Quick check without loading full image data
+                        img_info = doc.extract_image(xref)
+                        if img_info and img_info.get("image"):
+                            is_embedded = True
+                        else:
                             is_embedded = False
-                        pix = None  # Clean up
                     except:
                         # If extraction fails, it might be linked
                         is_embedded = False
-                    
-                    # Also check the image object for external file references
-                    try:
-                        img_obj = doc.xref_object(xref)
-                        if "/F" in img_obj or "FFilter" in img_obj or "/Type/XObject" in img_obj:
-                            # Check if it references an external file
-                            if "/F" in img_obj:
-                                is_embedded = False
-                    except:
-                        pass
                     
                     colorspace = img[5]
                     if colorspace == "/DeviceCMYK":
@@ -410,7 +408,6 @@ def analyze_pdf(file_path):
                         result["images_low_dpi"] += 1
 
                     # Get actual file path from XMP if this is a linked image
-                    actual_path = None
                     if not is_embedded and linked_img_index < len(linked_image_paths):
                         actual_path = linked_image_paths[linked_img_index]
                         # Extract just the filename for display
@@ -442,58 +439,66 @@ def analyze_pdf(file_path):
                 except Exception as img_e:
                     result["warnings"].append(f"Failed to analyze image on page {page_index + 1}: {str(img_e)}")
 
-            # Vector analysis
+            # Vector analysis - limit to avoid memory issues
             try:
-                drawings = page.get_cdrawings()
-                for drawing in drawings:
-                    line_color_mode = detect_color_mode(drawing.get("color"))
-                    fill_color_mode = detect_color_mode(drawing.get("fill"))
+                if len(vector_details) < MAX_VECTORS:
+                    drawings = page.get_cdrawings()
+                    for drawing in drawings:
+                        if len(vector_details) >= MAX_VECTORS:
+                            break
+                            
+                        line_color_mode = detect_color_mode(drawing.get("color"))
+                        fill_color_mode = detect_color_mode(drawing.get("fill"))
 
-                    if line_color_mode != "Unknown":
-                        found_color_modes.add(line_color_mode)
-                    if fill_color_mode != "Unknown":
-                        found_color_modes.add(fill_color_mode)
+                        if line_color_mode != "Unknown":
+                            found_color_modes.add(line_color_mode)
+                        if fill_color_mode != "Unknown":
+                            found_color_modes.add(fill_color_mode)
 
-                    vector_details.append({
-                        "page": page_index + 1,
-                        "type": drawing.get("type", "unknown"),
-                        "line_color_mode": line_color_mode,
-                        "fill_color_mode": fill_color_mode
-                    })
-                    
-                    # Check for CutContour colors (commonly magenta spot color)
-                    # CutContour is often RGB(255,0,255) or CMYK(0,100,0,0)
-                    color = drawing.get("color")
-                    if color:
-                        # Check for magenta (common CutContour color)
-                        if isinstance(color, tuple):
-                            if len(color) == 3 and color == (1.0, 0.0, 1.0):  # RGB magenta
-                                result["has_cut_contour_layer"] = True
-                            elif len(color) == 4 and color[1] == 1.0 and color[0] == 0.0 and color[2] == 0.0:  # CMYK magenta
-                                result["has_cut_contour_layer"] = True
-                        elif isinstance(color, int):
-                            # RGB magenta as int: 0xFF00FF
-                            if color == 0xFF00FF or color == 16711935:
-                                result["has_cut_contour_layer"] = True
-                                
+                        vector_details.append({
+                            "page": page_index + 1,
+                            "type": drawing.get("type", "unknown"),
+                            "line_color_mode": line_color_mode,
+                            "fill_color_mode": fill_color_mode
+                        })
+                        
+                        # Check for CutContour colors
+                        color = drawing.get("color")
+                        if color:
+                            if isinstance(color, tuple):
+                                if len(color) == 3 and color == (1.0, 0.0, 1.0):
+                                    result["has_cut_contour_layer"] = True
+                                elif len(color) == 4 and color[1] == 1.0 and color[0] == 0.0 and color[2] == 0.0:
+                                    result["has_cut_contour_layer"] = True
+                            elif isinstance(color, int):
+                                if color == 0xFF00FF or color == 16711935:
+                                    result["has_cut_contour_layer"] = True
+                                    
             except Exception as ve:
                 result["warnings"].append(f"Vector analysis failed on page {page_index + 1}: {str(ve)}")
 
-            # Text color analysis
+            # Text color analysis - sample only, don't collect all
             try:
-                rawdict = page.get_text("rawdict")
-                for block in rawdict.get("blocks", []):
-                    for line in block.get("lines", []):
-                        for span in line.get("spans", []):
-                            col = span.get("color")
-                            color_mode = detect_color_mode(col)
-                            if color_mode != "Unknown":
-                                found_color_modes.add(color_mode)
-                                text_color_details.append({
-                                    "page": page_index + 1,
-                                    "text": span.get("text", "")[:30],
-                                    "color_mode": color_mode
-                                })
+                if len(text_color_details) < MAX_TEXT_COLORS:
+                    rawdict = page.get_text("rawdict")
+                    for block in rawdict.get("blocks", []):
+                        if len(text_color_details) >= MAX_TEXT_COLORS:
+                            break
+                        for line in block.get("lines", []):
+                            if len(text_color_details) >= MAX_TEXT_COLORS:
+                                break
+                            for span in line.get("spans", []):
+                                if len(text_color_details) >= MAX_TEXT_COLORS:
+                                    break
+                                col = span.get("color")
+                                color_mode = detect_color_mode(col)
+                                if color_mode != "Unknown":
+                                    found_color_modes.add(color_mode)
+                                    text_color_details.append({
+                                        "page": page_index + 1,
+                                        "text": span.get("text", "")[:30],
+                                        "color_mode": color_mode
+                                    })
             except Exception as te:
                 result["warnings"].append(f"Text analysis failed on page {page_index + 1}: {str(te)}")
 
