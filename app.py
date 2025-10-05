@@ -3,6 +3,7 @@ from flask_cors import CORS
 from PyPDF2 import PdfReader
 import fitz  # PyMuPDF
 import xml.etree.ElementTree as ET
+import re
 import os
 
 app = Flask(__name__)
@@ -54,6 +55,42 @@ def extract_xmp_color_mode(file_path):
         print(f"XMP parsing error: {e}")
     return None
 
+# ---- Extract linked image paths from XMP ----
+def extract_linked_image_paths(file_path):
+    """Extract linked image file paths from XMP metadata."""
+    linked_paths = []
+    try:
+        reader = PdfReader(file_path)
+        if "/Metadata" in reader.trailer["/Root"]:
+            metadata_obj = reader.trailer["/Root"]["/Metadata"].get_object()
+            xmp_xml = metadata_obj.get_data()
+            
+            # Parse as string to find file paths
+            xmp_str = xmp_xml.decode('utf-8', errors='ignore')
+            
+            # Look for stRef:filePath tags
+            file_path_pattern = r'<stRef:filePath>([^<]+)</stRef:filePath>'
+            matches = re.findall(file_path_pattern, xmp_str)
+            
+            for match in matches:
+                linked_paths.append(match.strip())
+            
+            # Also try parsing as XML for more structured approach
+            try:
+                root = ET.fromstring(xmp_xml)
+                # Search for filePath elements in any namespace
+                for elem in root.iter():
+                    if 'filePath' in elem.tag or elem.tag.endswith('filePath'):
+                        if elem.text:
+                            linked_paths.append(elem.text.strip())
+            except:
+                pass  # Regex method above should catch most cases
+                
+    except Exception as e:
+        print(f"XMP linked image path extraction error: {e}")
+    
+    return list(set(linked_paths))  # Remove duplicates
+
 # ---- PDF Analyzer Function ----
 def analyze_pdf(file_path):
     """Comprehensive PDF analysis for print readiness."""
@@ -82,6 +119,9 @@ def analyze_pdf(file_path):
     if xmp_mode:
         result["document_color_mode"] = xmp_mode.upper()
 
+    # --- Extract linked image paths from XMP ---
+    linked_image_paths = extract_linked_image_paths(file_path)
+
     # --- PyPDF2 fonts/layers analysis ---
     try:
         reader = PdfReader(file_path)
@@ -89,9 +129,12 @@ def analyze_pdf(file_path):
 
         is_all_fonts_embedded = True
         fonts_found = set()
+        linked_images = []
 
-        for page in reader.pages:
+        for page_num, page in enumerate(reader.pages):
             resources = page.get("/Resources", {})
+            
+            # Font analysis
             fonts = resources.get("/Font", {})
             if fonts:
                 for font_name, font_ref in fonts.items():
@@ -127,10 +170,39 @@ def analyze_pdf(file_path):
                     except Exception as fe:
                         result["warnings"].append(f"Font check failed for {font_name}: {fe}")
 
+            # Check for linked images in XObjects
+            xobjects = resources.get("/XObject", {})
+            if xobjects:
+                for xobj_name, xobj_ref in xobjects.items():
+                    try:
+                        xobj = xobj_ref.get_object()
+                        if xobj.get("/Subtype") == "/Image":
+                            # Check for external file reference
+                            if "/F" in xobj or "/FFilter" in xobj or "/FDecodeParms" in xobj:
+                                file_spec = xobj.get("/F")
+                                if file_spec:
+                                    file_path_obj = file_spec.get_object() if hasattr(file_spec, 'get_object') else file_spec
+                                    if isinstance(file_path_obj, dict) and "/F" in file_path_obj:
+                                        linked_path = str(file_path_obj["/F"])
+                                    else:
+                                        linked_path = str(file_spec)
+                                    
+                                    linked_images.append({
+                                        "page": page_num + 1,
+                                        "name": str(xobj_name),
+                                        "path": linked_path
+                                    })
+                                    result["images_linked"] += 1
+                    except Exception as xe:
+                        pass  # Silent fail for XObject inspection
+
         result["fonts_enclosed"] = is_all_fonts_embedded
         result["fonts_list"] = list(fonts_found)
+        result["linked_images_list"] = linked_images
+        
+        if linked_images:
+            result["warnings"].append(f"Found {len(linked_images)} linked (external) images. PDF may not be portable.")
 
-        # Check for layers
         catalog = reader.trailer["/Root"]
         result["layers"] = "/OCProperties" in catalog
 
@@ -148,6 +220,7 @@ def analyze_pdf(file_path):
         image_details = []
         vector_details = []
         text_color_details = []
+        linked_img_index = 0
 
         for page_index, page in enumerate(doc):
             # Image analysis
@@ -199,6 +272,14 @@ def analyze_pdf(file_path):
                     if 0 < dpi < 150:
                         result["images_low_dpi"] += 1
 
+                    # Get actual file path from XMP if this is a linked image
+                    actual_path = None
+                    if not is_embedded and linked_img_index < len(linked_image_paths):
+                        actual_path = linked_image_paths[linked_img_index]
+                        # Extract just the filename for display
+                        image_name = os.path.basename(actual_path)
+                        linked_img_index += 1
+
                     image_info = {
                         "page": page_index + 1,
                         "name": image_name,
@@ -208,15 +289,21 @@ def analyze_pdf(file_path):
                         "is_embedded": is_embedded
                     }
                     
+                    if actual_path:
+                        image_info["path"] = actual_path
+                    
                     if is_embedded:
                         result["images_embedded"] += 1
                     else:
                         result["images_linked"] += 1
-                        result["linked_images_list"].append({
+                        linked_info = {
                             "page": page_index + 1,
                             "name": image_name,
                             "xref": xref
-                        })
+                        }
+                        if actual_path:
+                            linked_info["path"] = actual_path
+                        result["linked_images_list"].append(linked_info)
                         result["warnings"].append(f"Linked image '{image_name}' found on page {page_index + 1}")
                     
                     image_details.append(image_info)
