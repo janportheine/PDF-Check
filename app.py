@@ -94,16 +94,35 @@ def analyze_pdf(file_path):
             fonts = resources.get("/Font", {})
             if fonts:
                 for font_name, font_ref in fonts.items():
-                    fonts_found.add(str(font_name))
                     try:
                         font_obj = font_ref.get_object()
+                        
+                        # Get actual font name
+                        actual_font_name = None
+                        if "/BaseFont" in font_obj:
+                            actual_font_name = str(font_obj["/BaseFont"]).replace("/", "")
+                        elif "/Name" in font_obj:
+                            actual_font_name = str(font_obj["/Name"]).replace("/", "")
+                        else:
+                            actual_font_name = str(font_name)
+                        
+                        fonts_found.add(actual_font_name)
+                        
+                        # Check if embedded
                         font_desc = font_obj.get("/FontDescriptor", {})
-                        embedded = any(
-                            k in font_desc for k in ("/FontFile", "/FontFile2", "/FontFile3")
-                        )
-                        if not embedded:
+                        if font_desc:
+                            font_desc_obj = font_desc.get_object() if hasattr(font_desc, 'get_object') else font_desc
+                            embedded = any(
+                                k in font_desc_obj for k in ("/FontFile", "/FontFile2", "/FontFile3")
+                            )
+                            if not embedded:
+                                is_all_fonts_embedded = False
+                                result["warnings"].append(f"Font '{actual_font_name}' is not embedded")
+                        else:
+                            # No font descriptor usually means not embedded
                             is_all_fonts_embedded = False
-                            result["warnings"].append(f"Font {font_name} is not embedded")
+                            result["warnings"].append(f"Font '{actual_font_name}' may not be embedded (no descriptor)")
+                            
                     except Exception as fe:
                         result["warnings"].append(f"Font check failed for {font_name}: {fe}")
 
