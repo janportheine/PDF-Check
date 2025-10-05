@@ -203,8 +203,29 @@ def analyze_pdf(file_path):
         if linked_images:
             result["warnings"].append(f"Found {len(linked_images)} linked (external) images. PDF may not be portable.")
 
+        # Check for layers and CutContour
         catalog = reader.trailer["/Root"]
         result["layers"] = "/OCProperties" in catalog
+        
+        # Check for CutContour or Thru-cut in OCProperties (Optional Content)
+        if "/OCProperties" in catalog:
+            try:
+                oc_props = catalog["/OCProperties"].get_object()
+                if "/OCGs" in oc_props:
+                    ocgs = oc_props["/OCGs"]
+                    for ocg in ocgs:
+                        try:
+                            ocg_obj = ocg.get_object()
+                            name = ocg_obj.get("/Name", "")
+                            if isinstance(name, str):
+                                if name == "CutContour" or name == "Thru-cut":
+                                    result["has_cut_contour_layer"] = True
+                                    result["warnings"].append(f"Cut layer detected: {name}")
+                                    break
+                        except:
+                            pass
+            except Exception as oc_e:
+                pass  # Silent fail for optional content inspection
 
     except Exception as e:
         result["warnings"].append(f"PyPDF2 analysis failed: {str(e)}")
@@ -329,6 +350,22 @@ def analyze_pdf(file_path):
                         "line_color_mode": line_color_mode,
                         "fill_color_mode": fill_color_mode
                     })
+                    
+                    # Check for CutContour colors (commonly magenta spot color)
+                    # CutContour is often RGB(255,0,255) or CMYK(0,100,0,0)
+                    color = drawing.get("color")
+                    if color:
+                        # Check for magenta (common CutContour color)
+                        if isinstance(color, tuple):
+                            if len(color) == 3 and color == (1.0, 0.0, 1.0):  # RGB magenta
+                                result["has_cut_contour_layer"] = True
+                            elif len(color) == 4 and color[1] == 1.0 and color[0] == 0.0 and color[2] == 0.0:  # CMYK magenta
+                                result["has_cut_contour_layer"] = True
+                        elif isinstance(color, int):
+                            # RGB magenta as int: 0xFF00FF
+                            if color == 0xFF00FF or color == 16711935:
+                                result["has_cut_contour_layer"] = True
+                                
             except Exception as ve:
                 result["warnings"].append(f"Vector analysis failed on page {page_index + 1}: {str(ve)}")
 
@@ -356,6 +393,10 @@ def analyze_pdf(file_path):
         result["vector_list"] = vector_details
         result["text_colors"] = text_color_details
         result["content_color_modes"] = list(found_color_modes)
+
+        # Add warning if CutContour detected
+        if result["has_cut_contour_layer"]:
+            result["warnings"].append("CutContour/Thru-cut layer detected in the PDF")
 
         # Add final warning if linked images found
         if result["images_linked"] > 0:
