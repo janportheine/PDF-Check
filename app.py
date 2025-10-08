@@ -7,9 +7,17 @@ import re
 import os
 import requests
 import tempfile
+import logging
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for frontend integration
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # Configuration
 ALLOWED_EXTENSIONS = {'.pdf'}
@@ -54,7 +62,7 @@ def extract_xmp_color_mode(file_path):
                 if elem.tag.lower().endswith("mode") and elem.text:
                     return elem.text.strip()
     except Exception as e:
-        print(f"XMP parsing error: {e}")
+        logger.error(f"XMP parsing error: {e}")
     return None
 
 # ---- Extract linked image paths from XMP ----
@@ -89,7 +97,7 @@ def extract_linked_image_paths(file_path):
                 pass  # Regex method above should catch most cases
                 
     except Exception as e:
-        print(f"XMP linked image path extraction error: {e}")
+        logger.error(f"XMP linked image path extraction error: {e}")
     
     return list(set(linked_paths))  # Remove duplicates
 
@@ -111,90 +119,180 @@ def check_cut_layers_in_xmp(file_path):
                 return True, matches[0]
                 
     except Exception as e:
-        print(f"XMP cut layer check error: {e}")
+        logger.error(f"XMP cut layer check error: {e}")
     
     return False, None
 
-# ---- Download file from Google Drive ----
+# ---- Download file from Google Drive (IMPROVED VIRUS SCAN BYPASS) ----
 def download_from_google_drive(file_id):
-    """Download a file from Google Drive using the file ID."""
+    """Download a file from Google Drive with advanced virus scan bypass."""
+    import time
+    
     try:
-        # Try direct download first
-        download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-        
         session = requests.Session()
-        response = session.get(download_url, stream=True, allow_redirects=True)
         
-        print(f"Initial response status: {response.status_code}")
-        print(f"Content-Type: {response.headers.get('Content-Type')}")
+        # Method 1: Try direct download with confirm parameter
+        logger.info(f"Attempting to download file ID: {file_id}")
+        url = f"https://drive.google.com/uc?export=download&id={file_id}"
         
-        # Check for virus scan warning (large files)
-        token = None
-        for key, value in response.cookies.items():
-            if key.startswith('download_warning'):
-                token = value
-                print(f"Found download warning token: {token}")
-                break
+        response = session.get(url, stream=True, allow_redirects=True, timeout=60)
+        logger.info(f"Initial response status: {response.status_code}")
+        logger.info(f"Content-Type: {response.headers.get('Content-Type')}")
         
-        if token:
-            # Retry with confirmation token for large files
-            params = {'id': file_id, 'confirm': token}
-            response = session.get(download_url, params=params, stream=True, allow_redirects=True)
-            print(f"Retry response status: {response.status_code}")
-        
-        # Alternative: Check if response is HTML (error page)
+        # Check if we got the virus scan warning page
         content_type = response.headers.get('Content-Type', '')
-        if 'text/html' in content_type and not token:
-            # For large files, Google uses a different pattern
-            # Try to extract the confirm code from the HTML
-            print("Received HTML, trying alternative method")
-            download_url = f"https://drive.google.com/u/0/uc?id={file_id}&export=download&confirm=t&uuid={file_id[:8]}"
-            response = session.get(download_url, stream=True, allow_redirects=True)
-            print(f"Alternative response status: {response.status_code}")
+        
+        if 'text/html' in content_type:
+            logger.info("Received HTML page, likely virus scan warning. Attempting bypass...")
+            
+            # Extract the confirmation token from cookies or response
+            confirm_token = None
+            
+            # Check cookies for download_warning token
+            for cookie in session.cookies:
+                if cookie.name.startswith('download_warning'):
+                    confirm_token = cookie.value
+                    logger.info(f"Found cookie token: {confirm_token}")
+                    break
+            
+            # If no cookie token, try to parse HTML for the confirm parameter
+            if not confirm_token:
+                try:
+                    html_content = response.text
+                    
+                    # Look for the download link in the HTML
+                    import re
+                    
+                    # Pattern 1: Look for download?confirm= in the HTML
+                    confirm_match = re.search(r'download\?[^"]*confirm=([^"&]+)', html_content)
+                    if confirm_match:
+                        confirm_token = confirm_match.group(1)
+                        logger.info(f"Extracted confirm token from HTML: {confirm_token}")
+                    
+                    # Pattern 2: Look for the UUID pattern
+                    if not confirm_token:
+                        uuid_match = re.search(r'uuid=([^"&]+)', html_content)
+                        if uuid_match:
+                            confirm_token = uuid_match.group(1)
+                            logger.info(f"Extracted UUID token: {confirm_token}")
+                    
+                    # Pattern 3: Look for id and confirm in form or link
+                    if not confirm_token:
+                        form_match = re.search(r'id=' + file_id + r'&amp;export=download&amp;confirm=([^"&]+)', html_content)
+                        if form_match:
+                            confirm_token = form_match.group(1)
+                            logger.info(f"Extracted form token: {confirm_token}")
+                            
+                except Exception as parse_error:
+                    logger.warning(f"Failed to parse HTML for token: {parse_error}")
+            
+            # Method 2: Try with the confirm token
+            if confirm_token:
+                logger.info("Retrying with confirm token...")
+                url_with_confirm = f"https://drive.google.com/uc?export=download&id={file_id}&confirm={confirm_token}"
+                response = session.get(url_with_confirm, stream=True, allow_redirects=True, timeout=60)
+                logger.info(f"Response with token - Status: {response.status_code}, Content-Type: {response.headers.get('Content-Type')}")
+            
+            # Method 3: Try alternative download URL (usercontent domain)
+            if 'text/html' in response.headers.get('Content-Type', ''):
+                logger.info("Still getting HTML, trying usercontent.google.com...")
+                url_alt = f"https://drive.usercontent.google.com/download?id={file_id}&export=download&confirm=t"
+                response = session.get(url_alt, stream=True, allow_redirects=True, timeout=60)
+                logger.info(f"Usercontent response - Status: {response.status_code}, Content-Type: {response.headers.get('Content-Type')}")
+            
+            # Method 4: Try with both confirm=t and authuser=0
+            if 'text/html' in response.headers.get('Content-Type', ''):
+                logger.info("Trying with authuser parameter...")
+                url_auth = f"https://drive.google.com/uc?export=download&id={file_id}&confirm=t&authuser=0"
+                response = session.get(url_auth, stream=True, allow_redirects=True, timeout=60)
+                logger.info(f"Auth response - Status: {response.status_code}, Content-Type: {response.headers.get('Content-Type')}")
+        
+        # Final check if we still have HTML
+        final_content_type = response.headers.get('Content-Type', '')
+        if 'text/html' in final_content_type:
+            logger.error("All bypass methods failed, still receiving HTML")
+            
+            # Try to extract useful error message from HTML
+            try:
+                html_preview = response.text[:500]
+                if 'quota' in html_preview.lower():
+                    return None, "Google Drive download quota exceeded for this file. Try again later or use direct file upload."
+                elif 'permission' in html_preview.lower() or 'access' in html_preview.lower():
+                    return None, "Cannot access file. Make sure it's shared with 'Anyone with the link can view'."
+                else:
+                    return None, "Could not download PDF from Google Drive. The file may be too large, not shared properly, or exceeded download quota. Try using direct file upload instead."
+            except:
+                return None, "Could not download PDF from Google Drive. Try using direct file upload instead."
         
         if response.status_code != 200:
-            return None, f"Failed to download file: HTTP {response.status_code}. Make sure the file is shared publicly."
+            return None, f"Failed to download: HTTP {response.status_code}. Make sure file is shared publicly."
         
-        # Create a temporary file
+        # Create temporary file
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
         temp_path = temp_file.name
+        temp_file.close()
         
-        # Write the content with explicit flushing to disk
+        # Download with progress tracking
         bytes_written = 0
-        with open(temp_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=32768):
-                if chunk:
-                    f.write(chunk)
-                    bytes_written += len(chunk)
-                    # Flush to disk periodically to avoid memory buildup
-                    if bytes_written % (1024 * 1024) == 0:  # Every 1MB
-                        f.flush()
-                        os.fsync(f.fileno())
+        chunk_size = 32768  # 32KB chunks
         
-        print(f"Downloaded {bytes_written} bytes to {temp_path}")
+        try:
+            with open(temp_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=chunk_size):
+                    if chunk:
+                        f.write(chunk)
+                        bytes_written += len(chunk)
+                        
+                        # Log progress for large files
+                        if bytes_written % (1024 * 1024 * 10) == 0:  # Every 10MB
+                            logger.info(f"Downloaded {bytes_written / (1024*1024):.1f} MB...")
         
-        # Verify it's a valid PDF
+        except Exception as write_error:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except:
+                    pass
+            raise write_error
+        
+        logger.info(f"Successfully downloaded {bytes_written} bytes ({bytes_written/(1024*1024):.2f} MB)")
+        
+        # Verify file
         file_size = os.path.getsize(temp_path)
         if file_size == 0:
-            os.remove(temp_path)
+            try:
+                os.remove(temp_path)
+            except:
+                pass
             return None, "Downloaded file is empty"
         
-        # Check PDF header
-        with open(temp_path, 'rb') as f:
-            header = f.read(5)
-            print(f"File header: {header}")
-            if header != b'%PDF-':
-                # Try to read first 200 bytes to see what we got
-                f.seek(0)
-                preview = f.read(200)
-                print(f"File preview: {preview[:100]}")
+        # Verify PDF header
+        try:
+            with open(temp_path, 'rb') as f:
+                header = f.read(5)
+                if header != b'%PDF-':
+                    f.seek(0)
+                    preview = f.read(200)
+                    logger.error(f"Invalid PDF. Header: {header}, Preview: {preview[:100]}")
+                    try:
+                        os.remove(temp_path)
+                    except:
+                        pass
+                    return None, "Downloaded file is not a valid PDF. Ensure file is shared with 'Anyone with the link can view'."
+        except Exception as read_error:
+            try:
                 os.remove(temp_path)
-                return None, "Downloaded file is not a valid PDF. Make sure the file is shared with 'Anyone with the link can view'"
+            except:
+                pass
+            return None, f"Error validating file: {str(read_error)}"
         
         return temp_path, None
-            
+        
+    except requests.Timeout:
+        logger.error("Download timeout")
+        return None, "Download timeout (60s). File may be too large or connection is slow."
     except Exception as e:
-        print(f"Exception during download: {str(e)}")
+        logger.error(f"Download exception: {str(e)}")
         import traceback
         traceback.print_exc()
         return None, f"Download error: {str(e)}"
@@ -543,7 +641,7 @@ def index():
     """API information endpoint."""
     return jsonify({
         "name": "PDF Analyzer API",
-        "version": "2.0",
+        "version": "2.1",
         "endpoints": {
             "/analyze": "POST - Upload PDF for analysis",
             "/analyze-drive": "POST - Analyze PDF from Google Drive file ID",
@@ -554,7 +652,12 @@ def index():
 @app.route("/health", methods=["GET"])
 def health():
     """Health check endpoint for monitoring."""
-    return jsonify({"status": "healthy"}), 200
+    import sys
+    return jsonify({
+        "status": "healthy",
+        "python_version": sys.version,
+        "temp_dir_writable": os.access("/tmp", os.W_OK)
+    }), 200
 
 @app.route("/analyze", methods=["POST"])
 def analyze():
@@ -593,6 +696,7 @@ def analyze():
         return jsonify(analysis_result), 200
         
     except Exception as e:
+        logger.error(f"Analysis failed: {str(e)}")
         return jsonify({"error": f"Analysis failed: {str(e)}"}), 500
         
     finally:
@@ -601,7 +705,7 @@ def analyze():
             try:
                 os.remove(temp_path)
             except Exception as cleanup_error:
-                print(f"Failed to remove temp file: {cleanup_error}")
+                logger.warning(f"Failed to remove temp file: {cleanup_error}")
 
 @app.route("/analyze-drive", methods=["POST"])
 def analyze_drive():
@@ -614,15 +718,19 @@ def analyze_drive():
     file_id = data["fileId"]
     file_name = data.get("fileName", "unknown.pdf")
     
+    logger.info(f"Attempting to download file from Google Drive: {file_id}")
+    
     # Download file from Google Drive
     temp_path, error = download_from_google_drive(file_id)
     
     if error:
+        logger.error(f"Download failed: {error}")
         return jsonify({"error": error}), 400
     
     try:
         # Get file size
         file_size = os.path.getsize(temp_path)
+        logger.info(f"Downloaded file size: {file_size} bytes")
         
         # Analyze the PDF
         analysis_result = analyze_pdf(temp_path)
@@ -632,6 +740,7 @@ def analyze_drive():
         return jsonify(analysis_result), 200
         
     except Exception as e:
+        logger.error(f"Analysis failed: {str(e)}")
         return jsonify({"error": f"Analysis failed: {str(e)}"}), 500
         
     finally:
@@ -640,7 +749,7 @@ def analyze_drive():
             try:
                 os.remove(temp_path)
             except Exception as cleanup_error:
-                print(f"Failed to remove temp file: {cleanup_error}")
+                logger.warning(f"Failed to remove temp file: {cleanup_error}")
 
 
 if __name__ == "__main__":
